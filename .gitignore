@@ -1,0 +1,11 @@
+# The Python install and reading models (set up again from requirements.txt)
+.venv/
+__pycache__/
+# Shop purchase data: bill photos and what the reader writes from them
+test-bills/
+bills-read/
+*.jpg
+*.jpeg
+*.png
+# The test bills' real figures (batches, quantities, rates): shop purchase data too
+tests/truth.json
