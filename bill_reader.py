@@ -224,8 +224,15 @@ def fix_digits(word):
     return word
 
 
+MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+
+
 def expiry(text):
     t = text.replace(' ', '')
+    named = re.search(r'(' + '|'.join(MONTHS) + r')[A-Z]*[-/.]?(\d{2,4})', t.upper())
+    if named:
+        year = int(named.group(2))
+        return f'{MONTHS.index(named.group(1)) + 1:02d}/{year + 2000 if year < 100 else year}'
     m = re.search(r'(\d{4})[/\-.](\d{1,2})', t) or re.fullmatch(r'(\d{4})[1lI|\\7](\d{2})', t)  # "2027107": / read as 1 or 7
     if m:
         year, month = int(m.group(1)), int(m.group(2))
@@ -235,9 +242,9 @@ def expiry(text):
             return None
         month, year = int(m.group(1)), int(m.group(2))
         year += 2000 if year < 100 else 0
-    if not 1 <= month <= 12:
+    if month > 99:
         return None
-    return f'{month:02d}/{year}'
+    return f'{month:02d}/{year}'  # an impossible month (17) is repaired by fix_year, which marks it
 
 
 def pack(text):
@@ -273,7 +280,9 @@ def bill_words(text):
 
 def is_ditto(text):
     """'- do -' on a bill: the same medicine as the line above."""
-    return re.fullmatch(r'[-_~\s]*d[o0][-_~.\s]*', text.strip(), re.IGNORECASE) is not None
+    t = text.strip()
+    return re.fullmatch(r'[-_~\s]*d[o0][-_~.\s]*', t, re.IGNORECASE) is not None \
+        or ('-' in t and re.fullmatch(r'[-_~.\s]*[A-Za-z0-9]{1,2}[-_~.\s]*', t) is not None)  # "- da-", "-0-"
 
 
 def title(word):
@@ -428,13 +437,17 @@ def bill_info(rows):
         m = re.search(r'AN\s*[:.]\s*(\d{9})', t)  # "PAN:" is sometimes read as "AN:"
         if m and 'PAN' not in info:  # the supplier's PAN comes first; the shop's own is further down
             info['PAN'] = m.group(1)
-        m = re.search(r'(INVOICE|BILL)\s*NO\.?\s*:?\s*([A-Z0-9/\-]+)', t)
+        if re.search(r'CREDIT\s*NOTE|GOODS\s*RETURN|DEBIT\s*NOTE', t):
+            info['Kind'] = 'Credit note (goods returned)'
+        m = re.search(r'(I?NVOICE|BILL|CREDIT\s*NOTE)\s*NO\.?\s*:?\s*([A-Z0-9/\-]+)', t)
         if m and 'Bill no.' not in info:
             info['Bill no.'] = m.group(2)
         dates += re.findall(r'\b(20\d\d/\d\d/\d\d)\b', t)
         m = re.search(r'PAYMODE\s*:?\s*(\w+)', t)
         if m:
             info['Pay mode'] = m.group(1).capitalize()
+    if any(re.search(r'CREDIT\s*NOTE|GOODS\s*RETURN', row_text(r)) for r in rows[:len(head) + 3]):
+        info['Kind'] = 'Credit note (goods returned)'
     # Nepali (BS) dates are 2070 onwards; the bill prints both, and the shop keeps BS.
     bs = [d for d in dates if d >= '2070' and 1 <= int(d[5:7]) <= 12 and 1 <= int(d[8:]) <= 32]
     if bs or dates:
@@ -582,6 +595,18 @@ def fix_year(exp, notes):
     if not exp:
         return exp
     month, year = exp.split('/')
+    if not 1 <= int(month) <= 12:
+        # Known digit swaps first, in their usual order (17 -> 12, as 7 is read for 2); a month from 13 to 19
+        # with no such swap is taken as 12, the month whose 2 looks most like the misread digit.
+        swaps = [month[:i] + alt + month[i + 1:] for i, ch in enumerate(month) for alt in CONFUSED.get(ch, '')]
+        fit = next((m for m in swaps if 1 <= int(m) <= 12), None)
+        guess = fit or ('12' if 13 <= int(month) <= 19 else None)
+        if guess is None:
+            notes.append(f'Expiry month "{month}" cannot be right: type the expiry from the bill.')
+            return None
+        notes.append(f'Expiry month read as "{month}"; {guess}/{year} is the nearest real month'
+                     f'{"" if fit else " (a guess)"}. Check the bill.')
+        month, exp = guess, f'{guess}/{year}'
     now = date.today().year
     if now <= int(year) <= now + 7:  # an expiry before this year cannot be on a bill being entered now
         return exp
@@ -702,6 +727,8 @@ def parse(rows):
     else:
         added = sum((l['amount'] or Decimal(0) for l in lines), Decimal(0))
         checks.append(f'Lines add up to {added}, bill total is {total}. A line may be missing or misread: check this bill by hand.')
+        for l in lines:
+            l['notes'].append('The lines do not add up to the bill total: compare this bill with the paper.')
     if total is None:
         checks.append('Bill total not read.')
     if changes is not None and changes >= 4:
@@ -957,7 +984,7 @@ def main():
     (out / '.cache').mkdir(exist_ok=True)
     known = [(r['Name'], r['Strength']) for r in read_sheet(a.medicines, ['Name', 'Strength'])]
 
-    engines, bills, summary = {}, [], []
+    engines, bills, summary, contents, scores = {}, [], [], {}, {}
     for photo in photos:
         try:
             parsed = []
@@ -970,18 +997,34 @@ def main():
                 raise ValueError('could not find the table header (QTY / RATE / AMOUNT) on the bill')
             # The reading whose numbers agree with each other best; on a tie the medium one, which reads names better.
             name, rows, lines, checks, totals = max(parsed, key=lambda p: (p[4]['_score'], p[0] != 'small'))
-            totals.pop('_score')
+            score = totals.pop('_score')
             if a.debug:
                 print('    reading:', name)
                 for r in rows:
                     print('   ', ' | '.join(b.text for b in r))
             info = bill_info(rows)
-            twin = next((b for b in bills if info.get('Bill no.') and b[1].get('Bill no.') == info.get('Bill no.')), None)
-            if twin:  # the same bill photographed twice
-                summary.append(f"SAME  {photo.name}: bill {info['Bill no.']} again (also {twin[0].name}); left out.")
+            # The same bill photographed twice: the same number, or (number covered) the same lines and total.
+            # Content alone is not enough: a repeat order can have the same lines and total, and a credit note
+            # returns exactly the lines of a bill. So the date and the kind of document must match too.
+            content = (info.get('Kind'), info.get('Bill date'), totals.get('Total'),
+                       tuple(sorted((str(l['qty']), str(l['amount'])) for l in lines)))
+            twin = next((b for b in bills if b[1].get('Kind') == info.get('Kind') and (
+                (info.get('Bill no.') and b[1].get('Bill no.') == info.get('Bill no.'))
+                or (lines and content[1] and content[2] is not None and contents[b[0].name] == content))), None)
+            entry = (photo, info, lines, checks, totals)
+            contents[photo.name], scores[photo.name] = content, score
+            if twin and scores[twin[0].name] >= score:
+                summary.append(f"SAME  {photo.name}: same bill as {twin[0].name} ({twin[1].get('Bill no.', 'same lines and total')}); "
+                               'the clearer photo is used.')
                 print(summary[-1], flush=True)
                 continue
-            bills.append((photo, info, lines, checks, totals))
+            if twin:
+                bills[bills.index(twin)] = entry
+                summary.append(f"SAME  {twin[0].name}: same bill as {photo.name} ({info.get('Bill no.') or twin[1].get('Bill no.', '')}); "
+                               'the clearer photo is used.')
+                print(summary[-1], flush=True)
+                continue
+            bills.append(entry)
         except Exception as e:  # one bad photo must not stop the rest
             summary.append(f'FAIL  {photo.name}: {e}')
             print(summary[-1], flush=True)
@@ -1066,6 +1109,14 @@ def main():
 
     for photo, info, lines, checks, totals in bills:
         name = re.sub(r'[^\w\-]+', '-', f"{photo.stem}-{info.get('Bill no.', '')}").strip('-')
+        if info.get('Kind'):  # a credit note: goods returned to the supplier, never imported as a purchase
+            (out / 'returns').mkdir(exist_ok=True)
+            checks.insert(0, 'This is a CREDIT NOTE (goods returned to the supplier), not a purchase. Do not import it '
+                             'as a purchase: enter it in PharmaSathi as a purchase return.')
+            write_bill(out / 'returns' / f'{name}.xlsx', info, lines, checks, totals, names)
+            summary.append(f'RETURN {photo.name}: credit note {info.get("Bill no.", "")}, {len(lines)} lines -> returns/{name}.xlsx')
+            print(summary[-1], flush=True)
+            continue
         write_bill(out / 'bills' / f'{name}.xlsx', info, lines, checks, totals, names)
         marked = sum(1 for l in lines if l['notes'] or names[l['bill_name']]['Note'])
         bad = any('add up' in c or 'not read' in c for c in checks)

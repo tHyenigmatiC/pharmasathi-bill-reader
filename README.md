@@ -16,6 +16,7 @@ It writes into `/path/to/bill-photos/bills-read/`:
 | `names.xlsx` | Every medicine name printed on the bills and the medicine it means | Check the yellow rows, correct Name / Strength / Unit / Strip size, delete the Note |
 | `new-medicines.xlsx` | Medicines the shop does not have yet, in the Medicines import template | Import it in PharmaSathi (Medicines) **before** the bills |
 | `bills/*.xlsx` | One purchase-template file per bill, with a **Check** column | New purchase → Import from Excel; look at yellow lines; type the overall discount the Bill details sheet gives |
+| `returns/*.xlsx` | Credit notes (goods returned to the supplier) | Enter as a purchase return, never as a purchase |
 | `summary.txt` | One line per photo | |
 
 Run it again after editing `names.xlsx`: your changes are kept, and photos already read are not read again
@@ -23,7 +24,8 @@ Run it again after editing `names.xlsx`: your changes are kept, and photos alrea
 shop's own medicines are matched instead of being added again.
 
 Photos: flat, upright or sideways, in good light, the whole table in view. A bill photographed twice
-(same bill number) is left out the second time.
+(same bill number, or the same date, lines and total when the number is covered) is used once, from the
+clearer photo.
 
 ## How it stays accurate
 
@@ -57,7 +59,8 @@ rm -rf test-bills/bills-read/names.xlsx test-bills/bills-read/bills test-bills/b
 ```
 
 It prints how many values are right, wrong but marked, and **wrong and not marked**. The last must stay 0.
-On 2026-11-21 (24 photos of one distributor's bills, 23 bills): 318 of 335 right (95%), 17 wrong but marked, 0 unmarked.
+On 2026-11-21 (35 photos of one distributor's bills: 31 invoices, 1 credit note, 3 repeat photos): 423 of 438 right
+(97%), 15 wrong but marked, 0 unmarked; all 32 purchase files import into PharmaSathi.
 
 To add a bill to the tests: put its photo in `test-bills/` as `bill-N.jpg` and its values in `truth.json`
 (batch, expiry MM/YYYY, qty, rate, amount per line; total, discount, rounding, net). Use `null` for a value
